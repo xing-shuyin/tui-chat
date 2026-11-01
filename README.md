@@ -18,13 +18,18 @@
 
 ## ⌨️ 快捷键指南
 
-| 快捷键 | 功能说明 |
-| :--- | :--- |
-| `Ctrl + N` | 新建对话（New Chat） |
-| `Ctrl + B` | 折叠 / 展开侧边栏会话列表 |
-| `Ctrl + D` | 删除当前选中会话 |
-| `Ctrl + Q` | 退出程序 |
-| `Enter` | 发送输入框消息 |
+| 快捷键 (Windows / Linux) | 快捷键 (macOS Terminal / iTerm2) | 功能说明 |
+| :--- | :--- | :--- |
+| `Ctrl + N` | `^N` / `⌥N` | 新建对话（New Chat） |
+| `Ctrl + B` | `^B` / `⌥B` | 折叠 / 展开侧边栏会话列表 |
+| `Ctrl + D` | `^D` / `⌥D` | 删除当前选中会话 |
+| `Ctrl + Y` | `^Y` / `⌥C` | 复制最新回答到系统剪贴板 |
+| `Ctrl + K` | `^K` / `⌥K` | 复制最新代码块到系统剪贴板 |
+| `Ctrl + V` | `^V` / `⌥V` | 从系统原生剪贴板粘贴到输入框 |
+| `Ctrl + Q` | `^Q` | 退出程序 |
+| `Enter` | `Enter` | 发送输入框消息 |
+
+> 💡 **剪贴板交互增强**：每个消息卡片均内置紧凑操作栏，可直接点击「📋 复制文本」或「💻 复制代码」将内容同步至系统原生剪贴板（macOS 原生 Pasteboard、Linux Wayland/X11 或 Windows）。
 
 ---
 
@@ -75,7 +80,9 @@ uv run pytest
 src/tui_chat/
 ├── __init__.py       # 包入口及主程序暴露
 ├── app.py            # Textual TUI 应用主体（布局、事件响应、流式挂载）
+├── clipboard.py      # 系统原生剪贴板服务（macOS pbcopy/paste、Linux、Windows及代码块提取）
 ├── config.py         # 全局配置管理（环境变量与存储目录）
+├── keymap.py         # 终端输入层与跨平台快捷键映射（macOS iTerm2/Terminal适配）
 ├── providers.py      # 模型 Provider 抽象（OpenAI-compatible、Mock）
 ├── schemas.py        # Pydantic 核心数据模型（Message, Session, Role）
 └── storage.py        # 会话持久化引擎（原子替换防损坏）
