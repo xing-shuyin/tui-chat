@@ -9,14 +9,21 @@ from textual.containers import Container, Horizontal, Vertical, VerticalScroll
 from textual.reactive import reactive
 from textual.widgets import Button, Footer, Header, Input, Label, ListItem, ListView, Static
 
+from tui_chat.clipboard import (
+    ClipboardService,
+    clipboard_service as default_clipboard_service,
+    extract_code_blocks,
+    get_last_code_block,
+)
 from tui_chat.config import AppConfig, config
+from tui_chat.keymap import get_chat_bindings, get_terminal_environment
 from tui_chat.providers import BaseProvider, MockProvider, OpenAIProvider
 from tui_chat.schemas import Message, Role, Session
 from tui_chat.storage import SessionStore
 
 
 class MessageItem(Static):
-    """Widget displaying a single chat message."""
+    """Widget displaying a single chat message with copy toolbar."""
 
     def __init__(self, message: Message, **kwargs) -> None:
         super().__init__(**kwargs)
@@ -25,10 +32,42 @@ class MessageItem(Static):
     def compose(self) -> ComposeResult:
         if self.message.role == Role.USER:
             yield Static(f"[bold cyan]You[/bold cyan]:\n{self.message.content}", classes="user-msg")
+            with Horizontal(classes="msg-toolbar"):
+                btn = Button("📋 复制", classes="copy-btn copy-msg-btn")
+                btn.can_focus = False
+                yield btn
         else:
             model_info = f" ({self.message.model})" if self.message.model else ""
             yield Static(f"[bold magenta]Assistant{model_info}[/bold magenta]:", classes="assistant-header")
             yield Static(Markdown(self.message.content), classes="assistant-msg")
+
+            code_blocks = extract_code_blocks(self.message.content)
+            with Horizontal(classes="msg-toolbar"):
+                msg_btn = Button("📋 复制文本", classes="copy-btn copy-msg-btn")
+                msg_btn.can_focus = False
+                yield msg_btn
+
+                for idx, (lang, code) in enumerate(code_blocks):
+                    lang_label = f" ({lang})" if lang else ""
+                    code_btn = Button(f"💻 代码 {idx+1}{lang_label}", classes="copy-btn copy-code-btn")
+                    code_btn.can_focus = False
+                    code_btn._code_content = code
+                    code_btn._code_lang = lang
+                    yield code_btn
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if "copy-msg-btn" in event.button.classes:
+            event.stop()
+            self.app.copy_to_system_clipboard(self.message.content)
+            self.notify("消息内容已复制到系统剪贴板", title="系统剪贴板")
+        elif "copy-code-btn" in event.button.classes:
+            event.stop()
+            code = getattr(event.button, "_code_content", "")
+            lang = getattr(event.button, "_code_lang", "")
+            if code:
+                self.app.copy_to_system_clipboard(code)
+                title = f"代码块 [{lang}]" if lang else "代码块"
+                self.notify(f"{title} 已复制到系统剪贴板", title="系统剪贴板")
 
 
 class StreamingMessageItem(Static):
@@ -61,7 +100,7 @@ class SessionListItem(ListItem):
 
 
 class ChatApp(App):
-    """Main Textual Chat Application."""
+    """Main Textual Chat Application with cross-platform and macOS terminal adaptations."""
 
     CSS = """
     Screen {
@@ -127,7 +166,8 @@ class ChatApp(App):
         background: $primary-darken-3;
         color: $text;
         padding: 1;
-        margin: 1 0;
+        margin-top: 1;
+        margin-bottom: 0;
         border-left: wide cyan;
     }
 
@@ -138,17 +178,43 @@ class ChatApp(App):
     .assistant-msg {
         background: $surface-darken-1;
         padding: 1;
-        margin-bottom: 1;
+        margin-bottom: 0;
         border-left: wide magenta;
+    }
+
+    .msg-toolbar {
+        height: auto;
+        margin-top: 0;
+        margin-bottom: 1;
+        align-horizontal: right;
+    }
+
+    .copy-btn {
+        height: 1;
+        min-width: 8;
+        border: none;
+        padding: 0 1;
+        margin-left: 1;
+        background: $panel-lighten-1;
+        color: $text-muted;
+    }
+
+    .copy-btn:hover {
+        background: $accent;
+        color: $text;
+    }
+
+    .copy-code-btn {
+        background: $success-darken-3;
+    }
+
+    .copy-code-btn:hover {
+        background: $success;
+        color: $text;
     }
     """
 
-    BINDINGS = [
-        Binding("ctrl+n", "new_chat", "新建对话", priority=True),
-        Binding("ctrl+b", "toggle_sidebar", "侧边栏", priority=True),
-        Binding("ctrl+d", "delete_current_session", "删除会话", priority=True),
-        Binding("ctrl+q", "quit", "退出", priority=True),
-    ]
+    BINDINGS = get_chat_bindings()
 
     sidebar_visible = reactive(True)
 
@@ -157,12 +223,14 @@ class ChatApp(App):
         app_config: Optional[AppConfig] = None,
         provider: Optional[BaseProvider] = None,
         store: Optional[SessionStore] = None,
+        clipboard: Optional[ClipboardService] = None,
         **kwargs,
     ) -> None:
         super().__init__(**kwargs)
         self.app_config = app_config or config
         self.app_config.ensure_directories()
         self.store = store or SessionStore(self.app_config.storage_dir)
+        self.clipboard_service = clipboard or default_clipboard_service
 
         if provider is not None:
             self.provider = provider
@@ -191,8 +259,15 @@ class ChatApp(App):
         yield Footer()
 
     def on_mount(self) -> None:
-        self.title = "TUI-Chat (Textual)"
-        self.sub_title = f"Model: {self.app_config.default_model} | Provider: {self.provider.__class__.__name__}"
+        term_info = get_terminal_environment()
+        term_name = term_info["name"]
+        term_desc = f" ({term_name})" if term_name != "Standard Terminal" else ""
+        self.title = f"TUI-Chat{term_desc}"
+        self.sub_title = (
+            f"Model: {self.app_config.default_model} | "
+            f"Provider: {self.provider.__class__.__name__} | "
+            f"Clipboard: {self.clipboard_service.backend_name}"
+        )
         self.refresh_session_list()
         # Create or load first session
         sessions = self.store.list_sessions()
@@ -200,6 +275,58 @@ class ChatApp(App):
             self.switch_to_session(sessions[0])
         else:
             self.action_new_chat()
+
+    def copy_to_system_clipboard(self, text: str) -> bool:
+        """Copy text to both Textual's internal clipboard and OS system clipboard."""
+        self.copy_to_clipboard(text)
+        return self.clipboard_service.copy(text)
+
+    def action_copy_last_message(self) -> None:
+        """Copy the content of the most recent message to the system clipboard."""
+        if not self.current_session or not self.current_session.messages:
+            self.notify("当前会话没有可复制的消息", title="剪贴板", severity="warning")
+            return
+
+        target_msg = None
+        for msg in reversed(self.current_session.messages):
+            if msg.role == Role.ASSISTANT:
+                target_msg = msg
+                break
+        if not target_msg:
+            target_msg = self.current_session.messages[-1]
+
+        self.copy_to_system_clipboard(target_msg.content)
+        role_label = "回答" if target_msg.role == Role.ASSISTANT else "消息"
+        self.notify(f"最新{role_label}已复制到系统剪贴板", title="系统剪贴板")
+
+    def action_copy_last_code(self) -> None:
+        """Copy the most recent Markdown code block to the system clipboard."""
+        if not self.current_session or not self.current_session.messages:
+            self.notify("当前会话没有消息", title="剪贴板", severity="warning")
+            return
+
+        for msg in reversed(self.current_session.messages):
+            last_block = get_last_code_block(msg.content)
+            if last_block:
+                lang, code = last_block
+                self.copy_to_system_clipboard(code)
+                lang_desc = f" [{lang}]" if lang else ""
+                self.notify(f"最新代码块{lang_desc}已复制到系统剪贴板", title="系统剪贴板")
+                return
+
+        self.notify("当前会话中未检测到 Markdown 代码块", title="剪贴板", severity="warning")
+
+    def action_paste_clipboard(self) -> None:
+        """Paste text from system clipboard into the chat input."""
+        text = self.clipboard_service.paste()
+        if not text:
+            self.notify("系统剪贴板为空", title="剪贴板", severity="warning")
+            return
+
+        input_widget = self.query_one("#chat-input", Input)
+        input_widget.insert_text_at_cursor(text)
+        input_widget.focus()
+        self.notify("已从系统剪贴板粘贴文本", title="系统剪贴板")
 
     def action_toggle_sidebar(self) -> None:
         sidebar = self.query_one("#sidebar")
@@ -274,10 +401,8 @@ class ChatApp(App):
             self.action_new_chat()
 
         assert self.current_session is not None
-        # Add user message
         user_msg = self.current_session.add_message(Role.USER, text)
         if len(self.current_session.messages) == 1:
-            # Auto title from first message
             self.current_session.title = text[:15] + ("..." if len(text) > 15 else "")
             self.refresh_session_list()
 
@@ -287,7 +412,6 @@ class ChatApp(App):
         scroll.mount(MessageItem(user_msg))
         scroll.scroll_end(animate=True)
 
-        # Trigger streaming assistant response
         asyncio.create_task(self.generate_response())
 
     async def generate_response(self) -> None:
@@ -315,13 +439,15 @@ class ChatApp(App):
             stream_item.append_chunk(f"\n\n[出错了: {e}]")
         finally:
             self._is_generating = False
-            # Save assistant message to session
             assistant_msg = self.current_session.add_message(
                 Role.ASSISTANT,
                 full_content,
                 model=self.current_session.model,
             )
             self.store.save_session(self.current_session)
+            await stream_item.remove()
+            await scroll.mount(MessageItem(assistant_msg))
+            scroll.scroll_end(animate=True)
 
 
 def main() -> None:
